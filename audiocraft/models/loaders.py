@@ -108,6 +108,10 @@ def load_lm_model(file_or_url_or_id: tp.Union[Path, str], device='cpu', cache_di
         cfg.dtype = 'float32'
     else:
         cfg.dtype = 'float16'
+
+    print("* damian: force-disabling xformers")
+    cfg.transformer_lm.memory_efficient = False
+    
     _delete_param(cfg, 'conditioners.self_wav.chroma_stem.cache_path')
     _delete_param(cfg, 'conditioners.args.merge_text_conditions_p')
     _delete_param(cfg, 'conditioners.args.drop_desc_p')

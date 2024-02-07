@@ -20,7 +20,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 from torch.utils.checkpoint import checkpoint as torch_checkpoint
-from xformers import ops
+#from xformers import ops
 
 from .rope import RotaryEmbedding
 from .streaming import StreamingModule

@@ -24,7 +24,7 @@ codebooks_pattern:
 transformer_lm:
   n_q: 4
   card: 2048
-  memory_efficient: true
+  memory_efficient: false
   bias_proj: false
   bias_ff: false
   bias_attn: false
