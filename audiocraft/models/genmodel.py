@@ -70,7 +70,7 @@ class BaseGenModel(ABC):
         self.extend_stride: tp.Optional[float] = None
         self.device = next(iter(lm.parameters())).device
         self.generation_params: dict = {}
-        self._progress_callback: tp.Optional[tp.Callable[[int, int], None]] = None
+        self._progress_callback: tp.Optional[tp.Callable[[int, int, torch.Tensor], None]] = None
         if self.device.type == 'cpu' or self.device.type == 'mps':
             self.autocast = TorchAutocast(enabled=False)
         else:
@@ -92,7 +92,7 @@ class BaseGenModel(ABC):
         """Audio channels of the generated audio."""
         return self.compression_model.channels
 
-    def set_custom_progress_callback(self, progress_callback: tp.Optional[tp.Callable[[int, int], None]] = None):
+    def set_custom_progress_callback(self, progress_callback: tp.Optional[tp.Callable[[int, int, torch.Tensor], None]] = None):
         """Override the default progress callback."""
         self._progress_callback = progress_callback
 
@@ -205,12 +205,12 @@ class BaseGenModel(ABC):
         max_prompt_len = int(min(self.duration, self.max_duration) * self.frame_rate)
         current_gen_offset: int = 0
 
-        def _progress_callback(generated_tokens: int, tokens_to_generate: int):
+        def _progress_callback(generated_tokens: int, tokens_to_generate: int, current_tokens: torch.Tensor):
             generated_tokens += current_gen_offset
             if self._progress_callback is not None:
                 # Note that total_gen_len might be quite wrong depending on the
                 # codebook pattern used, but with delay it is almost accurate.
-                self._progress_callback(generated_tokens, tokens_to_generate)
+                self._progress_callback(generated_tokens, tokens_to_generate, current_tokens)
             else:
                 print(f'{generated_tokens: 6d} / {tokens_to_generate: 6d}', end='\r')
 

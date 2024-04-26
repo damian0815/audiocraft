@@ -133,7 +133,7 @@ class MagnetLMModel(LMModel):
                  two_step_cfg: tp.Optional[bool] = None,
                  remove_prompts: bool = False,
                  check: bool = False,
-                 callback: tp.Optional[tp.Callable[[int, int], None]] = None,
+                 callback: tp.Optional[tp.Callable[[int, int, torch.Tensor], None]] = None,
                  **kwargs) -> torch.Tensor:
 
         assert cfg_coef is None, "Unsupported in MAGNeT. Use max_cfg_coef,min_cfg_coef instead."
@@ -161,7 +161,7 @@ class MagnetLMModel(LMModel):
                          temp: float = 3.0,
                          top_k: int = 0,
                          top_p: float = 0.9,
-                         callback: tp.Optional[tp.Callable[[int, int], None]] = None,
+                         callback: tp.Optional[tp.Callable[[int, int, torch.Tensor], None]] = None,
                          max_cfg_coef: float = 10.0,
                          min_cfg_coef: float = 1.0,
                          decoding_steps: tp.List[int] = [20, 10, 10, 10],
@@ -284,7 +284,7 @@ class MagnetLMModel(LMModel):
                         span_arrangement: str = 'nonoverlap',
                         curr_step: int = 0,
                         total_steps: int = 0,
-                        callback: tp.Optional[tp.Callable[[int, int], None]] = None) -> tp.Tuple[torch.Tensor, int]:
+                        callback: tp.Optional[tp.Callable[[int, int, torch.Tensor], None]] = None) -> tp.Tuple[torch.Tensor, int]:
         """Generate audio tokens of a single RVQ level (stage), given the previously generated stages,
            and the textual conditions.
         Args:
@@ -438,7 +438,7 @@ class MagnetLMModel(LMModel):
 
             if callback is not None:
                 curr_step += 1
-                callback(curr_step, total_steps)
+                callback(curr_step, total_steps, gen_sequence)
 
         return gen_sequence, curr_step
 

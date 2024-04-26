@@ -406,7 +406,7 @@ class LMModel(StreamingModule):
                  two_step_cfg: tp.Optional[bool] = None,
                  remove_prompts: bool = False,
                  check: bool = False,
-                 callback: tp.Optional[tp.Callable[[int, int], None]] = None,
+                 callback: tp.Optional[tp.Callable[[int, int, torch.Tensor], None]] = None,
                  **kwargs) -> torch.Tensor:
         """Generate tokens sampling from the model given a prompt or unconditionally. Generation can
         be performed in a greedy fashion or using sampling with top K and top P strategies.
@@ -493,6 +493,19 @@ class LMModel(StreamingModule):
         start_offset_sequence = pattern.get_first_step_with_timesteps(start_offset)
         assert start_offset_sequence is not None
 
+        def build_out_codes(gen_sequence):
+            # get back the codes, trimming the prompt if needed and cutting potentially incomplete timesteps
+            out_codes, out_indexes, out_mask = pattern.revert_pattern_sequence(gen_sequence,
+                                                                               special_token=unknown_token)
+
+            # sanity checks over the returned codes and corresponding masks
+            assert (out_codes[..., :max_gen_len] != unknown_token).all()
+            assert (out_mask[..., :max_gen_len] == 1).all()
+
+            out_start_offset = start_offset if remove_prompts else 0
+            out_codes = out_codes[..., out_start_offset:max_gen_len]
+            return out_codes
+
         with self.streaming():
             unconditional_state = self.get_streaming_state()
             prev_offset = 0
@@ -522,7 +535,7 @@ class LMModel(StreamingModule):
                 )
                 prev_offset = offset
                 if callback is not None:
-                    callback(1 + offset - start_offset_sequence, gen_sequence_len - start_offset_sequence)
+                    callback(1 + offset - start_offset_sequence, gen_sequence_len - start_offset_sequence, build_out_codes(gen_sequence))
         unconditional_state.clear()
 
         # ensure sequence has been entirely filled
@@ -532,16 +545,8 @@ class LMModel(StreamingModule):
         assert (
             gen_sequence == torch.where(mask[None, ...].expand(B, -1, -1), gen_sequence, self.special_token_id)
         ).all()
-        # get back the codes, trimming the prompt if needed and cutting potentially incomplete timesteps
-        out_codes, out_indexes, out_mask = pattern.revert_pattern_sequence(gen_sequence, special_token=unknown_token)
 
-        # sanity checks over the returned codes and corresponding masks
-        assert (out_codes[..., :max_gen_len] != unknown_token).all()
-        assert (out_mask[..., :max_gen_len] == 1).all()
-
-        out_start_offset = start_offset if remove_prompts else 0
-        out_codes = out_codes[..., out_start_offset:max_gen_len]
-
+        out_codes = build_out_codes(gen_sequence)
         # ensure the returned codes are all valid
         assert (out_codes >= 0).all() and (out_codes <= self.card).all()
         return out_codes
