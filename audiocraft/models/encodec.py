@@ -40,7 +40,7 @@ class CompressionModel(ABC, nn.Module):
         ...
 
     @abstractmethod
-    def decode(self, codes: torch.Tensor, scale: tp.Optional[torch.Tensor] = None):
+    def decode(self, codes: torch.Tensor, scale: tp.Optional[torch.Tensor] = None, force_cpu_elu: bool = False):
         """See `EncodecModel.decode`."""
         ...
 
@@ -237,7 +237,7 @@ class EncodecModel(CompressionModel):
         codes = self.quantizer.encode(emb)
         return codes, scale
 
-    def decode(self, codes: torch.Tensor, scale: tp.Optional[torch.Tensor] = None):
+    def decode(self, codes: torch.Tensor, scale: tp.Optional[torch.Tensor] = None, force_cpu_elu = False):
         """Decode the given codes to a reconstructed representation, using the scale to perform
         audio denormalization if needed.
 
@@ -248,11 +248,28 @@ class EncodecModel(CompressionModel):
         Returns:
             out (torch.Tensor): Float tensor of shape [B, C, T], the reconstructed audio.
         """
+
+        def force_elu_cpu_forward(input):
+            input_device = input.device
+            for i, module in enumerate(self.decoder.model):
+                #print(f"module {i}: {type(module)}")
+                if isinstance(module, torch.nn.ELU):
+                    input = module(input.cpu()).to(input_device)
+                else:
+                    input = module(input)
+            return input
+
         emb = self.decode_latent(codes)
-        out = self.decoder(emb)
-        out = self.postprocess(out, scale)
+        if force_cpu_elu:
+            out = force_elu_cpu_forward(emb)
+        else:
+            out = self.decoder(emb)
+        pp = self.postprocess(out, scale)
+        with open(f'{codes.device}-decode.pkl', 'wb') as f:
+            import pickle
+            pickle.dump({'emb': emb, 'out': out, 'pp': pp}, f)
         # out contains extra padding added by the encoder and decoder
-        return out
+        return pp
 
     def decode_latent(self, codes: torch.Tensor):
         """Decode from the discrete codes to continuous latent space."""
