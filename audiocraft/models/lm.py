@@ -3,12 +3,13 @@
 #
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
-
 from dataclasses import dataclass
 from functools import partial
 import logging
 import math
 import typing as tp
+import random
+
 
 import torch
 from torch import nn
@@ -381,12 +382,13 @@ class LMModel(StreamingModule):
         # Apply softmax for sampling if temp > 0. Else, do greedy sampling to avoid zero division error.
         if use_sampling and temp > 0.0:
             probs = torch.softmax(logits / temp, dim=-1)
+            generator = torch.Generator().manual_seed(random.randint())
             if top_p > 0.0:
-                next_token = utils.sample_top_p(probs, p=top_p)
+                next_token = utils.sample_top_p(probs, p=top_p, generator=generator)
             elif top_k > 0:
-                next_token = utils.sample_top_k(probs, k=top_k)
+                next_token = utils.sample_top_k(probs, k=top_k, generator=generator)
             else:
-                next_token = utils.multinomial(probs, num_samples=1)
+                next_token = utils.multinomial(probs, num_samples=1, generator=generator)
         else:
             next_token = torch.argmax(logits, dim=-1, keepdim=True)
 
@@ -406,8 +408,8 @@ class LMModel(StreamingModule):
                  two_step_cfg: tp.Optional[bool] = None,
                  remove_prompts: bool = False,
                  check: bool = False,
-                 callback: tp.Optional[tp.Callable[[int, int, torch.Tensor], None]] = None,
-                 **kwargs) -> torch.Tensor:
+                 callback: tp.Optional[tp.Callable[[int, int, torch.Tensor], bool]] = None,
+                 **kwargs) -> tp.Optional[torch.Tensor]:
         """Generate tokens sampling from the model given a prompt or unconditionally. Generation can
         be performed in a greedy fashion or using sampling with top K and top P strategies.
 
@@ -424,9 +426,9 @@ class LMModel(StreamingModule):
             two_step_cfg (bool, optional): Whether to perform classifier-free guidance with two steps generation.
             remove_prompts (bool): Whether to remove prompts from generation or not.
             check (bool): Whether to apply further checks on generated sequence.
-            callback (Callback, optional): Callback function to report generation progress.
+            callback (Callback, optional): Callback function to report generation progress. Generation aborts if the callback returns True.
         Returns:
-            torch.Tensor: Generated tokens.
+            torch.Tensor: Generated tokens, or None if generation was aborted.
         """
         assert not self.training, "generation shouldn't be used in training mode."
         first_param = next(iter(self.parameters()))
@@ -535,7 +537,9 @@ class LMModel(StreamingModule):
                 )
                 prev_offset = offset
                 if callback is not None:
-                    callback(1 + offset - start_offset_sequence, gen_sequence_len - start_offset_sequence, build_out_codes(gen_sequence))
+                    should_cancel = callback(1 + offset - start_offset_sequence, gen_sequence_len - start_offset_sequence, build_out_codes(gen_sequence))
+                    if should_cancel:
+                        return None
         unconditional_state.clear()
 
         # ensure sequence has been entirely filled

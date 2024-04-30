@@ -96,6 +96,9 @@ class BaseGenModel(ABC):
         """Override the default progress callback."""
         self._progress_callback = progress_callback
 
+    def set_should_cancel_callback(self, cancellation_callback: tp.Optional[tp.Callable[[None], bool]] = None):
+        self._cancellation_callback = cancellation_callback
+
     @abstractmethod
     def set_generation_params(self, *args, **kwargs):
         """Set the generation parameters."""
@@ -149,7 +152,7 @@ class BaseGenModel(ABC):
         return self.generate_audio(tokens)
 
     def generate(self, descriptions: tp.List[str], progress: bool = False, return_tokens: bool = False) \
-            -> tp.Union[torch.Tensor, tp.Tuple[torch.Tensor, torch.Tensor]]:
+            -> tp.Union[None, torch.Tensor, tp.Tuple[torch.Tensor, torch.Tensor]]:
         """Generate samples conditioned on text.
 
         Args:
@@ -159,6 +162,8 @@ class BaseGenModel(ABC):
         attributes, prompt_tokens = self._prepare_tokens_and_attributes(descriptions, None)
         assert prompt_tokens is None
         tokens = self._generate_tokens(attributes, prompt_tokens, progress)
+        if tokens is None:
+            return None
         if return_tokens:
             return self.generate_audio(tokens), tokens
         return self.generate_audio(tokens)
@@ -213,6 +218,10 @@ class BaseGenModel(ABC):
                 self._progress_callback(generated_tokens, tokens_to_generate, current_tokens)
             else:
                 print(f'{generated_tokens: 6d} / {tokens_to_generate: 6d}', end='\r')
+            if self._cancellation_callback is not None:
+                should_cancel = self._cancellation_callback()
+                return should_cancel
+            return False
 
         if prompt_tokens is not None:
             assert max_prompt_len >= prompt_tokens.shape[-1], \
