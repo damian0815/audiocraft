@@ -85,7 +85,6 @@ class MagnetLMModel(LMModel):
             # parallel - non-causal - with restricted subcodes context
             sa_mask = self.restricted_context_attn_mask(seq_len, device=device, dtype=dtype)
 
-
         inefficient = os.environ.get("IGNORE_MEMORY_EFFICIENT")
         if not inefficient:
 
