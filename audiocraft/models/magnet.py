@@ -61,7 +61,9 @@ class MAGNeT(BaseGenModel):
                               top_p: float = 0.9, temperature: float = 3.0,
                               max_cfg_coef: float = 10.0, min_cfg_coef: float = 1.0,
                               decoding_steps: tp.List[int] = [20, 10, 10, 10],
-                              span_arrangement: str = 'nonoverlap'):
+                              span_arrangement: str = 'nonoverlap',
+                              initial_tokens: tp.Optional[torch.Tensor] = None,
+                              initial_timesteps: tp.List[float] = [0, 0, 0, 0]):
         """Set the generation parameters for MAGNeT.
 
         Args:
@@ -75,6 +77,9 @@ class MAGNeT(BaseGenModel):
                                                          for each of the n_q RVQ codebooks.
             span_arrangement (str, optional): Use either non-overlapping spans ('nonoverlap')
                                               or overlapping spans ('stride1') in the masking scheme.
+            initial_tokens (token tensor, optional): Tokens to start decoding from, or None to initialize automatically.
+            initial_timesteps (list of n_q floats 0..1, optional): Which timestep to start decoding from. Must be
+                                                                   >0 if initial_tokens is to have any effect.
         """
         self.generation_params = {
             'use_sampling': use_sampling,
@@ -84,5 +89,9 @@ class MAGNeT(BaseGenModel):
             'max_cfg_coef': max_cfg_coef,
             'min_cfg_coef': min_cfg_coef,
             'decoding_steps': [int(s) for s in decoding_steps],
-            'span_arrangement': span_arrangement
+            'span_arrangement': span_arrangement,
         }
+        if initial_tokens is not None:
+            self.generation_params['initial_tokens'] = initial_tokens
+        if initial_timesteps is not None:
+            self.generation_params['initial_timesteps'] = initial_timesteps

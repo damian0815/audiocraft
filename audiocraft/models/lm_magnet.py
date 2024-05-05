@@ -134,6 +134,7 @@ class MagnetLMModel(LMModel):
                  check: bool = False,
                  callback: tp.Optional[tp.Callable[[int, int, torch.Tensor], bool]] = None,
                  **kwargs) -> torch.Tensor:
+        print(f"in lm_magnet.generate with kwargs", kwargs)
 
         assert cfg_coef is None, "Unsupported in MAGNeT. Use max_cfg_coef,min_cfg_coef instead."
         assert two_step_cfg is None, "MAGNeT currently doesn't support two step classifier-free-guidance."
@@ -164,6 +165,8 @@ class MagnetLMModel(LMModel):
                          max_cfg_coef: float = 10.0,
                          min_cfg_coef: float = 1.0,
                          decoding_steps: tp.List[int] = [20, 10, 10, 10],
+                         initial_timesteps: tp.Optional[tp.List[float]] = None,
+                         initial_tokens: tp.Optional[torch.Tensor] = None,
                          anneal_temp: bool = True,
                          span_scoring='max',
                          span_arrangement='nonoverlap') -> tp.Optional[torch.Tensor]:
@@ -191,9 +194,14 @@ class MagnetLMModel(LMModel):
         Returns:
             torch.Tensor: Generated tokens, or None if generation was aborted.
         """
+        print(f"in lm_magnet - updated 3, initial_timesteps {initial_timesteps}, initial_tokens shape " +
+            f"{'None' if initial_tokens is None else initial_tokens.shape}")
         assert not self.training, "generation shouldn't be used in training mode."
         first_param = next(iter(self.parameters()))
         device = first_param.device
+        initial_timesteps = initial_timesteps or [0,0,0,0]
+        if prompt is not None and initial_tokens is not None:
+            raise ValueError("pass either prompt or initial_tokens, not both")
 
         # Checking all input shapes are consistent.
         possible_num_samples = []
@@ -233,14 +241,26 @@ class MagnetLMModel(LMModel):
         # we generate codes with a fixed sequence length
         shape = (B, K, max_gen_len)
 
-        gen_codes = torch.full(shape, mask_id, dtype=torch.long, device=device)
-        # filling the gen_codes with the prompt if needed
-        gen_codes[..., :start_offset] = prompt
+        if initial_tokens is not None:
+            print("using initial tokens with shape", initial_tokens.shape)
+            if initial_tokens.shape != shape:
+                raise ValueError(f"initial_tokens shape {initial_tokens.shape} is incompatible with this model (expected {shape})")
+            gen_codes = initial_tokens.to(dtype=torch.long, device=device)
+            for i in range(K):
+                if initial_timesteps[i] == 0:
+                    gen_codes[:, i, :] = torch.full((1, max_gen_len), mask_id, dtype=torch.long, device=device)
+        else:
+            gen_codes = torch.full(shape, mask_id, dtype=torch.long, device=device)
+            # filling the gen_codes with the prompt if needed
+            gen_codes[..., :start_offset] = prompt
         # create the gen_sequence with proper interleaving from the pattern: [B, K, S]
         gen_sequence = gen_codes
 
         curr_step = 0
-        for stage, n_steps in zip(range(self.n_q), decoding_steps):
+        for stage, n_steps, initial_timestep in zip(range(self.n_q), decoding_steps, initial_timesteps):
+            if initial_timestep == 1:
+                curr_step += n_steps
+                continue
             generate_stage_result = self._generate_stage(gen_sequence,
                                                            cfg_conditions,
                                                            stage=stage,
@@ -252,6 +272,7 @@ class MagnetLMModel(LMModel):
                                                            min_cfg_coef=min_cfg_coef,
                                                            top_k=top_k,
                                                            top_p=top_p,
+                                                           initial_timestep=initial_timestep,
                                                            timesteps=n_steps,
                                                            anneal_temp=anneal_temp,
                                                            span_scoring=span_scoring,
@@ -280,6 +301,7 @@ class MagnetLMModel(LMModel):
                         min_cfg_coef: float = 1.0,
                         top_k: int = 0,
                         top_p: float = 0.0,
+                        initial_timestep: float = 0,
                         timesteps: int = 10,
                         anneal_temp: bool = True,
                         span_scoring: str = 'max',
@@ -302,6 +324,7 @@ class MagnetLMModel(LMModel):
             min_clsfg_coef (float): Final coefficient used for classifier free guidance.
             top_k (int): k for "top-k" sampling.
             top_p (float): p for "top-p" sampling.
+            initial_timestep (float): The timestep (0..1) to start generating from. Values >0 will preserve some of the incoming gen_sequence.
             timesteps (int): Number of iterative decoding steps.
             anneal_temp (bool): When set to True, softmax temperature will be linearly decayed to zero, at each stage.
             span_scoring (str): Use the maximum probability of each span ('max')
@@ -318,7 +341,9 @@ class MagnetLMModel(LMModel):
         shape = (B, 1, T)  # generating a single codebook per stage
 
         mask_id = self.special_token_id
-        stage_gen_seq = torch.full(shape, mask_id, dtype=torch.long, device=device)
+        #stage_gen_seq = torch.full(shape, mask_id, dtype=torch.long, device=device)
+        stage_gen_seq = gen_sequence[:, [stage], :]
+        print(f"generating stage {stage} from timestep {initial_timestep}")
 
         assert span_arrangement == 'nonoverlap' or span_arrangement == 'stride1'
         chunk_masking = self.span_len > 1 and span_arrangement == 'nonoverlap'
@@ -348,22 +373,31 @@ class MagnetLMModel(LMModel):
             gen_T = T - prompt_length
 
         # run MAGNeT iterative decoding for "timesteps" iterations
-        for timestep, steps_left in zip(torch.linspace(0, 1, timesteps, device=device), reversed(range(timesteps))):
+        for timestep, steps_left in zip(torch.linspace(initial_timestep, 1, timesteps, device=device), reversed(range(timesteps))):
 
+            is_initial_gt0_timestep = initial_timestep > 0 and steps_left == timesteps - 1
             mask_p = torch.cos(timestep * math.pi * 0.5)
+            pct_through = (timestep-initial_timestep) / (1-initial_timestep)
+            cfg_scale = torch.cos(pct_through * math.pi * 0.5)
 
             if chunk_masking:
                 num_masked = max(int((mask_p * num_chunks_to_gen).item()), 1)
             else:
                 num_masked = max(int((mask_p * gen_T).item()), 1)
 
+            #print(f'{timestep}: {mask_p}, masked {num_masked}')
+
             # masking
             run_lps_masking = (span_arrangement == 'stride1') and self.span_len > 1
             if run_lps_masking:
-                # masking of the k least probable overlapping (stride 1) spans
-                mask = torch.concat((
-                    [self._least_probable_span_masking(scores[[i], :, :], num_masked).to(device)
-                     for i in range(B)]), dim=0)
+                if is_initial_gt0_timestep:
+                    print("initial step in audio-to-audio - mask is all False so we can get scores")
+                    mask = torch.full(stage_gen_seq.shape, False)
+                else:
+                    # masking of the k least probable overlapping (stride 1) spans
+                    mask = torch.concat((
+                        [self._least_probable_span_masking(scores[[i], :, :], num_masked).to(device)
+                         for i in range(B)]), dim=0)
                 stage_gen_seq[mask] = mask_id
             else:
                 # masking of the k least probable non-overlapping spans
@@ -376,6 +410,8 @@ class MagnetLMModel(LMModel):
                 else:
                     stage_gen_seq = stage_gen_seq.scatter(2, masked, mask_id)
 
+            print(f"{'chunk ' if chunk_masking else ''}masking at timestep {timestep.item()}: p={mask_p}, count={num_masked}, mask {mask.shape} =", mask)
+
             if prompt is not None:
                 stage_gen_seq[..., :prompt_length] = prompt[:, stage, :].unsqueeze(1)
 
@@ -383,13 +419,15 @@ class MagnetLMModel(LMModel):
             if condition_tensors:
                 # duplicate input for classifier free guidance
                 sequence = torch.cat([gen_sequence, gen_sequence], dim=0)
+            else:
+                sequence = gen_sequence
 
             all_logits = model(sequence, [], condition_tensors, stage=stage)
 
             if condition_tensors:
                 # classifier free guidance with annealing
                 cond_logits, uncond_logits = all_logits.split(B, dim=0)  # [B, K, T, card]
-                clsfg_coef = float(mask_p) * max_cfg_coef + (1 - float(mask_p)) * min_cfg_coef
+                clsfg_coef = float(cfg_scale) * max_cfg_coef + (1 - float(cfg_scale)) * min_cfg_coef
                 logits = uncond_logits + (cond_logits - uncond_logits) * clsfg_coef
             else:
                 logits = all_logits
@@ -411,12 +449,16 @@ class MagnetLMModel(LMModel):
                 sampled_tokens = torch.argmax(logits, dim=-1, keepdim=True)
 
             # place mask_id token in each of the masked positions
-            mask = stage_gen_seq == mask_id
+            if is_initial_gt0_timestep:
+                mask = torch.full(stage_gen_seq.shape, True, device=stage_gen_seq.device)
+            else:
+                mask = stage_gen_seq == mask_id
             stage_gen_seq = torch.where(mask, sampled_tokens[..., 0], stage_gen_seq)
             gen_sequence[:, [stage], :] = stage_gen_seq
 
             # get probs of sampled tokens
             sampled_probs = torch.gather(probs, 3, sampled_tokens)[..., 0]
+            print(f"sampled_probs: min {torch.min(sampled_probs)} shape {sampled_probs.shape}:", sampled_probs)
 
             # span scoring
             if chunk_masking:
@@ -433,10 +475,11 @@ class MagnetLMModel(LMModel):
                 scores = -torch.log(sampled_probs)
 
             # Fix unmasked tokens by placing inf probs (-inf scores)
-            if chunk_masking:
-                scores = scores.masked_fill(~chunks_mask, DONT_REMASK_ME_SCORE)
-            else:
-                scores = scores.masked_fill(~mask, DONT_REMASK_ME_SCORE)
+            if False and not is_initial_gt0_timestep:
+                if chunk_masking:
+                    scores = scores.masked_fill(~chunks_mask, DONT_REMASK_ME_SCORE)
+                else:
+                    scores = scores.masked_fill(~mask, DONT_REMASK_ME_SCORE)
 
             if callback is not None:
                 curr_step += 1
@@ -482,6 +525,7 @@ class MagnetLMModel(LMModel):
         # Span score is the product of probs (sum in log space)
         span_scores = scores_unfolded.sum(dim=-1)
         spans_by_scores = torch.argsort(span_scores[0, 0], descending=True)
+        print("spans by scores: ", spans_by_scores)
 
         num_masked_trg = max(num_masked_trg, self.span_len)
 
