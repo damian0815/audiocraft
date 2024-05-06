@@ -13,7 +13,7 @@ import torch
 
 from .genmodel import BaseGenModel
 from .loaders import load_compression_model, load_lm_model_magnet
-
+from ..modules.conditioners import ConditioningAttributes
 
 class MAGNeT(BaseGenModel):
     """MAGNeT main model with convenient generation API.
@@ -59,11 +59,15 @@ class MAGNeT(BaseGenModel):
 
     def set_generation_params(self, use_sampling: bool = True, top_k: int = 0,
                               top_p: float = 0.9, temperature: float = 3.0,
+                              sticky_mask: bool = True,
                               max_cfg_coef: float = 10.0, min_cfg_coef: float = 1.0,
                               decoding_steps: tp.List[int] = [20, 10, 10, 10],
                               span_arrangement: str = 'nonoverlap',
                               initial_tokens: tp.Optional[torch.Tensor] = None,
-                              initial_timesteps: tp.List[float] = [0, 0, 0, 0]):
+                              initial_mask_pcts: tp.List[float] = [0, 0, 0, 0],
+                              final_mask_pcts: tp.List[float] = [1, 1, 1, 1],
+                              negative_conditions: tp.Optional[tp.List[ConditioningAttributes]] = None
+                              ):
         """Set the generation parameters for MAGNeT.
 
         Args:
@@ -71,6 +75,7 @@ class MAGNeT(BaseGenModel):
             top_k (int, optional): top_k used for sampling. Defaults to 0.
             top_p (float, optional): top_p used for sampling, when set to 0 top_k is used. Defaults to 0.9.
             temperature (float, optional): Initial softmax temperature parameter. Defaults to 3.0.
+            sticky_mask (bool): If True, unmasking persists; if False, unmasking is re-evaluated for every token every timestep.
             max_cfg_coef (float, optional): Coefficient used for classifier free guidance. Defaults to 10.0.
             min_cfg_coef (float, optional): End coefficient of classifier free guidance annealing. Defaults to 1.0.
             decoding_steps (list of n_q ints, optional): The number of iterative decoding steps,
@@ -78,20 +83,23 @@ class MAGNeT(BaseGenModel):
             span_arrangement (str, optional): Use either non-overlapping spans ('nonoverlap')
                                               or overlapping spans ('stride1') in the masking scheme.
             initial_tokens (token tensor, optional): Tokens to start decoding from, or None to initialize automatically.
-            initial_timesteps (list of n_q floats 0..1, optional): Which timestep to start decoding from. Must be
-                                                                   >0 if initial_tokens is to have any effect.
+            initial_mask_pcts (list of n_q floats 0..1, optional): When using initial_tokens, the mask coverage
+                                                                  at the start of sampling.
+            final_mask_pcts (list of n_q floats 0..1, optional): The mask coverage at the end of sampling.
         """
         self.generation_params = {
             'use_sampling': use_sampling,
             'temp': temperature,
+            'sticky_mask': sticky_mask,
             'top_k': top_k,
             'top_p': top_p,
             'max_cfg_coef': max_cfg_coef,
             'min_cfg_coef': min_cfg_coef,
             'decoding_steps': [int(s) for s in decoding_steps],
             'span_arrangement': span_arrangement,
+            'initial_mask_pcts': initial_mask_pcts,
+            'final_mask_pcts': final_mask_pcts,
+            'negative_conditions': negative_conditions
         }
         if initial_tokens is not None:
             self.generation_params['initial_tokens'] = initial_tokens
-        if initial_timesteps is not None:
-            self.generation_params['initial_timesteps'] = initial_timesteps

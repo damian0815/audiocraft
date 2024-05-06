@@ -155,17 +155,20 @@ class MagnetLMModel(LMModel):
     def _generate_magnet(self,
                          prompt: tp.Optional[torch.Tensor] = None,
                          conditions: tp.List[ConditioningAttributes] = [],
+                         negative_conditions: tp.Optional[tp.List[ConditioningAttributes]] = None,
                          num_samples: tp.Optional[int] = None,
                          max_gen_len: int = 256,
                          use_sampling: bool = True,
                          temp: float = 3.0,
+                         sticky_mask: bool = True,
                          top_k: int = 0,
                          top_p: float = 0.9,
                          callback: tp.Optional[tp.Callable[[int, int, torch.Tensor], bool]] = None,
                          max_cfg_coef: float = 10.0,
                          min_cfg_coef: float = 1.0,
                          decoding_steps: tp.List[int] = [20, 10, 10, 10],
-                         initial_timesteps: tp.Optional[tp.List[float]] = None,
+                         initial_mask_pcts: tp.List[float] = [0, 0, 0, 0],
+                         final_mask_pcts: tp.List[float] = [1, 1, 1, 1],
                          initial_tokens: tp.Optional[torch.Tensor] = None,
                          anneal_temp: bool = True,
                          span_scoring='max',
@@ -179,6 +182,7 @@ class MagnetLMModel(LMModel):
             max_gen_len (int): Maximum generation length.
             use_sampling (bool): Whether to use a sampling strategy or not.
             temp (float): Initial sampling temperature.
+            sticky_mask (bool): If True, unmasking persists; if False, unmasking is re-evaluated for every token every timestep.
             top_k (int): k for "top-k" sampling.
             top_p (float): p for "top-p" sampling.
             callback (Callback): Callback function to report generation progress. Abort generation if the callback returns True.
@@ -194,12 +198,9 @@ class MagnetLMModel(LMModel):
         Returns:
             torch.Tensor: Generated tokens, or None if generation was aborted.
         """
-        print(f"in lm_magnet - updated 3, initial_timesteps {initial_timesteps}, initial_tokens shape " +
-            f"{'None' if initial_tokens is None else initial_tokens.shape}")
         assert not self.training, "generation shouldn't be used in training mode."
         first_param = next(iter(self.parameters()))
         device = first_param.device
-        initial_timesteps = initial_timesteps or [0,0,0,0]
         if prompt is not None and initial_tokens is not None:
             raise ValueError("pass either prompt or initial_tokens, not both")
 
@@ -221,7 +222,10 @@ class MagnetLMModel(LMModel):
         # we then do 1 forward pass instead of 2.
         cfg_conditions: tp.Optional[ConditionTensors]
         if conditions:
-            null_conditions = ClassifierFreeGuidanceDropout(p=1.0)(conditions)
+            if negative_conditions:
+                null_conditions = negative_conditions
+            else:
+                null_conditions = ClassifierFreeGuidanceDropout(p=1.0)(conditions)
             conditions = conditions + null_conditions
             tokenized = self.condition_provider.tokenize(conditions)
             cfg_conditions = self.condition_provider(tokenized)
@@ -246,9 +250,17 @@ class MagnetLMModel(LMModel):
             if initial_tokens.shape != shape:
                 raise ValueError(f"initial_tokens shape {initial_tokens.shape} is incompatible with this model (expected {shape})")
             gen_codes = initial_tokens.to(dtype=torch.long, device=device)
-            for i in range(K):
-                if initial_timesteps[i] == 0:
-                    gen_codes[:, i, :] = torch.full((1, max_gen_len), mask_id, dtype=torch.long, device=device)
+            for stage in range(K):
+                if initial_mask_pcts[stage] == 0:
+                    gen_codes[:, stage, :] = torch.full((1, max_gen_len), mask_id, dtype=torch.long, device=device)
+                """else:
+                    print(f"randomly masking {initial_mask_pcts[stage]*100}% of spans in stage {stage}")
+                    num_masked_spans = round(initial_mask_pcts[stage] * possible_span_starts.shape[0])
+                    possible_span_starts = (torch.arange(0, max_gen_len // self.span_len) * 3).long()
+                    selected_span_starts_to_mask = torch.randperm(num_masked_spans, possible_span_starts)
+                    mask = self._construct_spans_mask(span_starts = selected_span_starts_to_mask, T=gen_codes.shape[2], device=device)
+                    gen_codes[:, [stage], :] = torch.where(mask, mask_id, gen_codes[:, stage])
+                """
         else:
             gen_codes = torch.full(shape, mask_id, dtype=torch.long, device=device)
             # filling the gen_codes with the prompt if needed
@@ -257,8 +269,8 @@ class MagnetLMModel(LMModel):
         gen_sequence = gen_codes
 
         curr_step = 0
-        for stage, n_steps, initial_timestep in zip(range(self.n_q), decoding_steps, initial_timesteps):
-            if initial_timestep == 1:
+        for stage, n_steps, initial_mask_pct, final_mask_pct in zip(range(self.n_q), decoding_steps, initial_mask_pcts, final_mask_pcts):
+            if initial_mask_pct == 1:
                 curr_step += n_steps
                 continue
             generate_stage_result = self._generate_stage(gen_sequence,
@@ -268,11 +280,13 @@ class MagnetLMModel(LMModel):
                                                            prompt_length=prompt_length,
                                                            prompt=prompt,
                                                            temp=temp,
+                                                           sticky_mask=sticky_mask,
                                                            max_cfg_coef=max_cfg_coef,
                                                            min_cfg_coef=min_cfg_coef,
                                                            top_k=top_k,
                                                            top_p=top_p,
-                                                           initial_timestep=initial_timestep,
+                                                           initial_mask_pct=initial_mask_pct,
+                                                           final_mask_pct=final_mask_pct,
                                                            timesteps=n_steps,
                                                            anneal_temp=anneal_temp,
                                                            span_scoring=span_scoring,
@@ -297,11 +311,13 @@ class MagnetLMModel(LMModel):
                         prompt: tp.Optional[torch.Tensor] = None,
                         use_sampling: bool = True,
                         temp: float = 3.0,
+                        sticky_mask: bool = True,
                         max_cfg_coef: float = 10.0,
                         min_cfg_coef: float = 1.0,
                         top_k: int = 0,
                         top_p: float = 0.0,
-                        initial_timestep: float = 0,
+                        initial_mask_pct: float = 0,
+                        final_mask_pct: float = 0,
                         timesteps: int = 10,
                         anneal_temp: bool = True,
                         span_scoring: str = 'max',
@@ -320,11 +336,15 @@ class MagnetLMModel(LMModel):
             prompt (torch.Tensor): Prompt tokens of shape [B, K, T].
             use_sampling (bool): Whether to use a sampling strategy or not.
             temp (float): Initial sampling temperature.
+            sticky_mask (bool): If True, unmasking persists; if False, unmasking is re-evaluated for every token every timestep.
             max_clsfg_coef (float): Initial coefficient used for classifier free guidance.
             min_clsfg_coef (float): Final coefficient used for classifier free guidance.
             top_k (int): k for "top-k" sampling.
             top_p (float): p for "top-p" sampling.
-            initial_timestep (float): The timestep (0..1) to start generating from. Values >0 will preserve some of the incoming gen_sequence.
+            initial_mask_pct (float): The non-mask coverage at the start of token sampling. Values >0 will
+                                      preserve some of the incoming gen_sequence.
+            final_mask_pct (float): The non-mask coverage at the end of token sampling. Values <1 will
+                                    prevent the token sequence settling to a final stable pattern.
             timesteps (int): Number of iterative decoding steps.
             anneal_temp (bool): When set to True, softmax temperature will be linearly decayed to zero, at each stage.
             span_scoring (str): Use the maximum probability of each span ('max')
@@ -343,7 +363,7 @@ class MagnetLMModel(LMModel):
         mask_id = self.special_token_id
         #stage_gen_seq = torch.full(shape, mask_id, dtype=torch.long, device=device)
         stage_gen_seq = gen_sequence[:, [stage], :]
-        print(f"generating stage {stage} from timestep {initial_timestep}")
+        print(f"generating stage {stage} with masking coverage {initial_mask_pct} - {final_mask_pct}")
 
         assert span_arrangement == 'nonoverlap' or span_arrangement == 'stride1'
         chunk_masking = self.span_len > 1 and span_arrangement == 'nonoverlap'
@@ -373,12 +393,12 @@ class MagnetLMModel(LMModel):
             gen_T = T - prompt_length
 
         # run MAGNeT iterative decoding for "timesteps" iterations
-        for timestep, steps_left in zip(torch.linspace(initial_timestep, 1, timesteps, device=device), reversed(range(timesteps))):
+        for pct_through, steps_left in zip(torch.linspace(0, 1, timesteps, device=device), reversed(range(timesteps))):
 
-            is_initial_gt0_timestep = initial_timestep > 0 and steps_left == timesteps - 1
-            mask_p = torch.cos(timestep * math.pi * 0.5)
-            pct_through = (timestep-initial_timestep) / (1-initial_timestep)
+            mask_pct = initial_mask_pct + pct_through * (final_mask_pct - initial_mask_pct)
+            mask_p = torch.cos(mask_pct * math.pi * 0.5)
             cfg_scale = torch.cos(pct_through * math.pi * 0.5)
+            is_initial_nonzeromask_timestep = mask_pct > 0 and steps_left == timesteps - 1
 
             if chunk_masking:
                 num_masked = max(int((mask_p * num_chunks_to_gen).item()), 1)
@@ -390,15 +410,24 @@ class MagnetLMModel(LMModel):
             # masking
             run_lps_masking = (span_arrangement == 'stride1') and self.span_len > 1
             if run_lps_masking:
-                if is_initial_gt0_timestep:
-                    print("initial step in audio-to-audio - mask is all False so we can get scores")
-                    mask = torch.full(stage_gen_seq.shape, False)
+                if is_initial_nonzeromask_timestep:
+                    print(f"initial step in audio-to-audio stage {stage} - synthetically setting mask to {mask_p * 100}% coverage")
+                    num_spans = T // self.span_len
+                    num_masked_spans = round(mask_p.item() * num_spans)
+                    possible_span_starts: torch.Tensor = (torch.arange(0, num_spans) * 3).long()
+                    selected_span_starts_indices = torch.randperm(num_spans)[:num_masked_spans]
+                    selected_span_starts = possible_span_starts[selected_span_starts_indices]
+                    mask = self._construct_spans_mask(span_starts = selected_span_starts, T=T, device=device)
+                    stage_gen_seq[:, :] = torch.where(mask, mask_id, stage_gen_seq[:, :])
+                    print(f" -> number of masked tokens: {torch.sum(mask)}")
+                    print(f"  = {(torch.sum(mask)/T).item() * 100}%")
+                    #mask = torch.full(stage_gen_seq.shape, False)
                 else:
                     # masking of the k least probable overlapping (stride 1) spans
                     mask = torch.concat((
                         [self._least_probable_span_masking(scores[[i], :, :], num_masked).to(device)
                          for i in range(B)]), dim=0)
-                stage_gen_seq[mask] = mask_id
+                    stage_gen_seq[mask] = mask_id
             else:
                 # masking of the k least probable non-overlapping spans
                 masked = scores.topk(num_masked, dim=-1).indices
@@ -410,7 +439,7 @@ class MagnetLMModel(LMModel):
                 else:
                     stage_gen_seq = stage_gen_seq.scatter(2, masked, mask_id)
 
-            print(f"{'chunk ' if chunk_masking else ''}masking at timestep {timestep.item()}: p={mask_p}, count={num_masked}, mask {mask.shape} =", mask)
+            print(f"{'chunk ' if chunk_masking else ''}masking at timestep {pct_through.item()}: p={mask_p}, count={num_masked}, mask {mask.shape} =", mask)
 
             if prompt is not None:
                 stage_gen_seq[..., :prompt_length] = prompt[:, stage, :].unsqueeze(1)
@@ -449,10 +478,10 @@ class MagnetLMModel(LMModel):
                 sampled_tokens = torch.argmax(logits, dim=-1, keepdim=True)
 
             # place mask_id token in each of the masked positions
-            if is_initial_gt0_timestep:
-                mask = torch.full(stage_gen_seq.shape, True, device=stage_gen_seq.device)
-            else:
-                mask = stage_gen_seq == mask_id
+            #if is_initial_nonzeromask_timestep:
+            #    mask = torch.full(stage_gen_seq.shape, True, device=stage_gen_seq.device)
+            #else:
+            mask = stage_gen_seq == mask_id
             stage_gen_seq = torch.where(mask, sampled_tokens[..., 0], stage_gen_seq)
             gen_sequence[:, [stage], :] = stage_gen_seq
 
@@ -475,7 +504,7 @@ class MagnetLMModel(LMModel):
                 scores = -torch.log(sampled_probs)
 
             # Fix unmasked tokens by placing inf probs (-inf scores)
-            if False and not is_initial_gt0_timestep:
+            if sticky_mask and not is_initial_nonzeromask_timestep:
                 if chunk_masking:
                     scores = scores.masked_fill(~chunks_mask, DONT_REMASK_ME_SCORE)
                 else:
