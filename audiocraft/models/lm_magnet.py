@@ -160,7 +160,7 @@ class MagnetLMModel(LMModel):
                          max_gen_len: int = 256,
                          use_sampling: bool = True,
                          temp: float = 3.0,
-                         sticky_mask: bool = True,
+                         wandering_mask: bool = False,
                          top_k: int = 0,
                          top_p: float = 0.9,
                          callback: tp.Optional[tp.Callable[[int, int, torch.Tensor], bool]] = None,
@@ -182,7 +182,7 @@ class MagnetLMModel(LMModel):
             max_gen_len (int): Maximum generation length.
             use_sampling (bool): Whether to use a sampling strategy or not.
             temp (float): Initial sampling temperature.
-            sticky_mask (bool): If True, unmasking persists; if False, unmasking is re-evaluated for every token every timestep.
+            wandering_mask (bool): If True, token fixing is re-evaluated for every token every timestep; If False, fixed tokens stay fixed.
             top_k (int): k for "top-k" sampling.
             top_p (float): p for "top-p" sampling.
             callback (Callback): Callback function to report generation progress. Abort generation if the callback returns True.
@@ -280,7 +280,7 @@ class MagnetLMModel(LMModel):
                                                            prompt_length=prompt_length,
                                                            prompt=prompt,
                                                            temp=temp,
-                                                           sticky_mask=sticky_mask,
+                                                           wandering_mask=wandering_mask,
                                                            max_cfg_coef=max_cfg_coef,
                                                            min_cfg_coef=min_cfg_coef,
                                                            top_k=top_k,
@@ -311,7 +311,7 @@ class MagnetLMModel(LMModel):
                         prompt: tp.Optional[torch.Tensor] = None,
                         use_sampling: bool = True,
                         temp: float = 3.0,
-                        sticky_mask: bool = True,
+                        wandering_mask: bool = False,
                         max_cfg_coef: float = 10.0,
                         min_cfg_coef: float = 1.0,
                         top_k: int = 0,
@@ -336,7 +336,7 @@ class MagnetLMModel(LMModel):
             prompt (torch.Tensor): Prompt tokens of shape [B, K, T].
             use_sampling (bool): Whether to use a sampling strategy or not.
             temp (float): Initial sampling temperature.
-            sticky_mask (bool): If True, unmasking persists; if False, unmasking is re-evaluated for every token every timestep.
+            wandering_mask (bool): If True, token fixing is re-evaluated for every token every timestep; If False, fixed tokens stay fixed.
             max_clsfg_coef (float): Initial coefficient used for classifier free guidance.
             min_clsfg_coef (float): Final coefficient used for classifier free guidance.
             top_k (int): k for "top-k" sampling.
@@ -504,7 +504,7 @@ class MagnetLMModel(LMModel):
                 scores = -torch.log(sampled_probs)
 
             # Fix unmasked tokens by placing inf probs (-inf scores)
-            if sticky_mask and not is_initial_nonzeromask_timestep:
+            if not wandering_mask and not is_initial_nonzeromask_timestep:
                 if chunk_masking:
                     scores = scores.masked_fill(~chunks_mask, DONT_REMASK_ME_SCORE)
                 else:
