@@ -136,8 +136,8 @@ class BaseGenModel(ABC):
         return attributes, prompt_tokens
 
     def generate_unconditional(self, num_samples: int, progress: bool = False,
-                               return_tokens: bool = False) -> tp.Union[torch.Tensor,
-                                                                        tp.Tuple[torch.Tensor, torch.Tensor]]:
+                               return_tokens: bool = False, return_audio: bool = True
+                               ) -> tp.Union[torch.Tensor, tp.Tuple[torch.Tensor, torch.Tensor]]:
         """Generate samples in an unconditional manner.
 
         Args:
@@ -159,7 +159,6 @@ class BaseGenModel(ABC):
             descriptions (list of str): A list of strings used as text conditioning.
             progress (bool, optional): Flag to display progress of the generation process. Defaults to False.
         """
-        print("in genmodel - generate - updated")
         attributes, prompt_tokens = self._prepare_tokens_and_attributes(descriptions, None)
         assert prompt_tokens is None
         tokens = self._generate_tokens(attributes, prompt_tokens, progress)
